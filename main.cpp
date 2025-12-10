@@ -14,6 +14,7 @@ int main(int argc, char** argv) {
     if (type == "int") run<int>(n);
     else if (type == "double") run<double>(n);
     else if (type == "char") run<char>(n);
+    else if (type == "point")  run<Point>(n);
     else return 1;
 
     return 0;

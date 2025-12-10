@@ -77,3 +77,24 @@ void run(std::size_t n) {
 
     std::cout << "\n";
 }
+
+
+struct Point {
+    double x{};
+    double y{};
+};
+
+
+inline bool operator<(const Point& a, const Point& b) {
+    if (a.x < b.x) return true;
+    if (a.x > b.x) return false;
+    return a.y < b.y;
+}
+inline std::istream& operator>>(std::istream& is, Point& p) {
+    return is >> p.x >> p.y;
+}
+
+inline std::ostream& operator<<(std::ostream& os, const Point& p) {
+    os << p.x << "," << p.y;
+    return os;
+}
