@@ -19,7 +19,13 @@ add_executable(QuickSortApp
         main.cpp
 )
 
+add_executable(benchmark
+        benchmark.cpp
+)
+
 target_link_libraries(QuickSortApp PRIVATE quicksort)
+
+target_include_directories(benchmark PRIVATE core)
 
 # -------------------------
 # GoogleTest
@@ -30,6 +36,22 @@ FetchContent_Declare(
         googletest
         URL https://github.com/google/googletest/archive/refs/tags/v1.15.0.zip
 )
+find_package(OpenMP REQUIRED)
+
+add_executable(benchmark_parallel benchmark_parallel.cpp)
+target_include_directories(benchmark_parallel PRIVATE core)
+target_link_libraries(benchmark_parallel PRIVATE quicksort)
+
+if (MSVC)
+    target_compile_options(benchmark_parallel PRIVATE /openmp)
+else()
+    target_compile_options(benchmark_parallel PRIVATE -fopenmp)
+    target_link_options(benchmark_parallel PRIVATE -fopenmp)
+endif()
+
+
+
+
 
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
