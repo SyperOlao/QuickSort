@@ -40,42 +40,50 @@ void QuickSort::insertion_sort(T *first, T *last, Compare comp) {
     }
 }
 
+template<typename T, typename Compare>
+void QuickSort::sort(T *first, T *last, Compare comp, std::ptrdiff_t insertion_threshold) {
+    if (!first || !last) return;
+    if (last - first <= 1) return;
+    if (insertion_threshold < 1) insertion_threshold = 1;
+
+
+    while (last - first > insertion_threshold) {
+        T pivot = median_of_three(first, last, comp);
+
+        T *lt = first;
+        T *i  = first;
+        T *gt = last;
+
+        while (i < gt) {
+            if (comp(*i, pivot)) {
+                std::swap(*lt, *i);
+                ++lt;
+                ++i;
+            } else if (comp(pivot, *i)) {
+                --gt;
+                std::swap(*i, *gt);
+            } else {
+                ++i;
+            }
+        }
+
+        const auto leftSize  = lt - first;
+        const auto rightSize = last - gt;
+
+        if (leftSize < rightSize) {
+            if (leftSize > 1) sort(first, lt, comp, insertion_threshold);
+            first = gt;
+        } else {
+            if (rightSize > 1) sort(gt, last, comp, insertion_threshold);
+            last = lt;
+        }
+    }
+
+    if (last - first > 1) insertion_sort(first, last, comp);
+}
+
 
 template<typename T, typename Compare>
 void QuickSort::sort(T *first, T *last, Compare comp) {
-    while (last - first > INSERTION_THRESHOLD) {
-        T &pivot_ref = median_of_three(first, last, comp);
-        T pivot = pivot_ref;
-
-        T *i = first;
-        T *j = last - 1;
-        while (true) {
-            while (comp(*i, pivot)) {
-                ++i;
-            }
-            while (comp(pivot, *j)) {
-                --j;
-            }
-            if (i >= j) {
-                break;
-            }
-            std::swap(*i, *j);
-            ++i;
-            --j;
-        }
-
-        T *mid = j + 1;
-
-        if (mid - first < last - mid) {
-            sort(first, mid, comp);
-            first = mid;
-        } else {
-            sort(mid, last, comp);
-            last = mid;
-        }
-    }
-
-    if (last - first > 1) {
-        insertion_sort(first, last, comp);
-    }
+    sort(first, last, comp, INSERTION_THRESHOLD);
 }
