@@ -958,6 +958,76 @@ class VisualOrbitalBody:
 
         return np.zeros(3, dtype=float)
 
+    def _get_sibling_min_axis(self) -> float:
+        """
+        Находит минимальную полуось среди sibling-ов того же типа
+        у того же родителя. Это будет опорная внутренняя орбита,
+        относительно которой сжимаем/раздвигаем остальные.
+        """
+        if self.node.orbit is None:
+            return 0.0
+
+        parent = self.node.parent
+        if parent is None:
+            return self.node.orbit.semi_major_axis
+
+        siblings: list[OrbitNode] = []
+
+        if isinstance(parent, SystemNode):
+            siblings = [
+                child for child in parent.children
+                if isinstance(child, OrbitNode)
+                and child.orbit is not None
+                and child.body.body_type == self.node.body.body_type
+            ]
+
+        elif isinstance(parent, BinarySystemRoot):
+            siblings = [
+                child for child in parent.children
+                if isinstance(child, OrbitNode)
+                and child.orbit is not None
+                and child.body.body_type == self.node.body.body_type
+            ]
+
+        elif isinstance(parent, OrbitNode):
+            siblings = [
+                child for child in parent.children
+                if child.orbit is not None
+                and child.body.body_type == self.node.body.body_type
+            ]
+
+        if not siblings:
+            return self.node.orbit.semi_major_axis
+
+        return min(child.orbit.semi_major_axis for child in siblings if child.orbit is not None)
+
+    def _get_scaled_axis(self, distance_scale: dict[BodyType, float]) -> float:
+        """
+        Масштабирование полуоси в зависимости от типа тела.
+
+        Логика:
+        - Planet: раздвигаем/сжимаем относительно самой внутренней планеты в группе
+        - Moon: масштабируем напрямую от планеты, чтобы moon distance всегда работал,
+                даже если у планеты всего одна луна
+        - Star/BH: обычный прямой масштаб от центра
+        """
+        if self.node.orbit is None:
+            return 0.0
+
+        raw_a = self.node.orbit.semi_major_axis
+        scale = distance_scale[self.body_type()]
+        body_type = self.body_type()
+
+        if body_type == "Planet":
+            anchor_a = self._get_sibling_min_axis()
+            return anchor_a + (raw_a - anchor_a) * scale
+
+        if body_type == "Moon":
+            return raw_a * scale
+
+        # Для звезд и прочего обычный масштаб
+        return raw_a * scale
+
     def get_world_position(
         self,
         root,
@@ -969,7 +1039,7 @@ class VisualOrbitalBody:
         if self.node.orbit is None:
             return parent_pos
 
-        scaled_a = self.node.orbit.semi_major_axis * distance_scale[self.body_type()]
+        scaled_a = self._get_scaled_axis(distance_scale)
 
         local = kepler_local_position(
             a=scaled_a,
@@ -990,7 +1060,7 @@ class VisualOrbitalBody:
         if self.node.orbit is None:
             return None
 
-        scaled_a = self.node.orbit.semi_major_axis * distance_scale[self.body_type()]
+        scaled_a = self._get_scaled_axis(distance_scale)
 
         x, y, z = kepler_local_curve(
             a=scaled_a,
@@ -1017,7 +1087,6 @@ class VisualOrbitalBody:
                 x, y, z = curve
                 self.orbit_artist.set_data(x, y)
                 self.orbit_artist.set_3d_properties(z)
-
 
 # =========================================================
 # ПЕЧАТЬ СТРУКТУРЫ
@@ -1109,8 +1178,8 @@ presets = {
 seed = 1337
 
 counts = {
-    "BH": 2,
-    "Star": 3,
+    "BH": 0,
+    "Star": 2,
     "Planet": 5,
     "Moon": 6,
 }
@@ -1175,7 +1244,7 @@ for i in range(6):
 
 slider_global_speed = Slider(axes_sliders[0], "global speed", 0.1, 5.0, valinit=1.0)
 slider_star_dist = Slider(axes_sliders[1], "star distance", 0.5, 2.5, valinit=1.0)
-slider_planet_dist = Slider(axes_sliders[2], "planet distance", 0.5, 2.5, valinit=1.0)
+slider_planet_dist = Slider(axes_sliders[2], "planet distance", 0.3, 3.0, valinit=1.0)
 slider_moon_dist = Slider(axes_sliders[3], "moon distance", 0.5, 3.0, valinit=1.0)
 slider_planet_speed = Slider(axes_sliders[4], "planet speed", 0.2, 3.0, valinit=1.0)
 slider_moon_speed = Slider(axes_sliders[5], "moon speed", 0.2, 5.0, valinit=1.0)
