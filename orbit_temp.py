@@ -211,6 +211,44 @@ class SystemGenerator:
         r2 = separation * (m1 / total)
         return r1, r2
 
+    def estimate_moon_capacity(self, planet_node: OrbitNode, central_mass: float) -> int:
+        """
+        Грубая оценка, сколько лун может влезть у планеты.
+        Считаем по доступному диапазону орбит между минимальной дистанцией
+        и допустимой частью Hill sphere.
+        """
+        if planet_node.orbit is None:
+            return 0
+
+        hill = self.hill_radius(
+            planet_a=planet_node.orbit.semi_major_axis,
+            planet_e=planet_node.orbit.eccentricity,
+            planet_mass=planet_node.body.mass,
+            parent_mass=central_mass,
+        )
+
+        moon_min_dist = max(
+            self.presets["Moon"].orbit_distance.min,
+            planet_node.body.radius * 3.0
+        )
+        moon_max_dist = min(
+            self.presets["Moon"].orbit_distance.max,
+            hill * 0.4
+        )
+
+        if moon_min_dist >= moon_max_dist:
+            return 0
+
+        usable_span = moon_max_dist - moon_min_dist
+
+        # Грубая оценка среднего места на одну луну
+        avg_moon_radius = (self.presets["Moon"].radius.min + self.presets["Moon"].radius.max) * 0.5
+        avg_gap = max(1.0, avg_moon_radius * 6.0)
+
+        capacity = int(usable_span // avg_gap)
+
+        # Хоть какая-то верхняя отсечка, чтобы мелкая сцена не превращалась в мусорку
+        return max(0, min(capacity, 8))
     # -------------------------
     # ПОДБОР НЕПЕРЕСЕКАЮЩИХСЯ ОРБИТ
     # -------------------------
@@ -220,16 +258,18 @@ class SystemGenerator:
             children_specs: list[tuple[BodyType, Body]],
             base_min_distance: float,
             max_distance: float,
-            clearance_factor: float = 4.0,
+            clearance_factor: float = 2.2,
             allow_expand_beyond_preset: bool = True,
-            expansion_factor: float = 3.0,
+            expansion_factor: float = 1.8,
+            compactness: float = 0.18,
     ) -> list[OrbitalParams]:
         """
         Генерация непересекающихся орбит вокруг одного родителя.
 
-        Логика:
-        - новая орбита должна начинаться после апоцентра предыдущей
-        - если preset.max слишком маленький и мешает, можно расширить диапазон
+        Главное отличие:
+        - орбиты не разбрасываются по всему диапазону
+        - новые тела ставятся близко к минимально допустимой дистанции
+        - compactness определяет, насколько плотно они будут сидеть
         """
         result: list[OrbitalParams] = []
         prev_apo = base_min_distance
@@ -245,10 +285,6 @@ class SystemGenerator:
                 prev_apo + self.orbit_clearance(prev_body_radius, body.radius, clearance_factor)
             )
 
-            # Базовый максимум из аргумента функции
-            effective_max_distance = max_distance
-
-            # Если нужно, разрешаем выйти за preset.max
             if allow_expand_beyond_preset:
                 effective_max_distance = max(
                     max_distance,
@@ -261,8 +297,14 @@ class SystemGenerator:
             if required_min_a >= effective_max_distance:
                 raise RuntimeError(
                     f"Не хватает диапазона орбиты для {body.name}: "
-                    f"required_min_a={required_min_a:.2f}, effective_max_distance={effective_max_distance:.2f}"
+                    f"required_min_a={required_min_a:.2f}, "
+                    f"effective_max_distance={effective_max_distance:.2f}"
                 )
+
+            # Вместо рандома по ВСЕМУ диапазону
+            # разрешаем небольшой локальный люфт около минимума
+            local_span = max(5.0, (effective_max_distance - required_min_a) * compactness)
+            local_max_a = min(effective_max_distance, required_min_a + local_span)
 
             for _ in range(500):
                 e = preset.eccentricity.sample(self.rng)
@@ -270,7 +312,8 @@ class SystemGenerator:
                 speed = preset.orbit_speed.sample(self.rng)
                 phase = self.rng.uniform(0.0, 2.0 * math.pi)
 
-                a = self.rng.uniform(required_min_a, effective_max_distance)
+                # Берем a близко к required_min_a
+                a = self.rng.uniform(required_min_a, local_max_a)
 
                 q = self.periapsis(a, e)
                 Q = self.apoapsis(a, e)
@@ -294,87 +337,169 @@ class SystemGenerator:
                 raise RuntimeError(f"Не удалось подобрать непересекающуюся орбиту для {body.name}")
 
         return result
+
+    def distribute_global_moons(
+            self,
+            planets: list[OrbitNode],
+            total_moons: int,
+            central_mass: float,
+    ) -> dict[int, int]:
+        """
+        Равномерно распределяет общее число лун между планетами системы.
+
+        Возвращает:
+            {planet_body_id: moon_count_for_this_planet}
+        """
+        if total_moons <= 0 or not planets:
+            return {}
+
+        capacities: dict[int, int] = {}
+        eligible_planets: list[OrbitNode] = []
+
+        for planet in planets:
+            cap = self.estimate_moon_capacity(planet, central_mass)
+            if cap > 0:
+                capacities[planet.body.id] = cap
+                eligible_planets.append(planet)
+
+        if not eligible_planets:
+            return {}
+
+        allocation = {planet.body.id: 0 for planet in eligible_planets}
+
+        # Сначала базовое равномерное распределение по кругу
+        remaining = total_moons
+        idx = 0
+        n = len(eligible_planets)
+
+        while remaining > 0:
+            planet = eligible_planets[idx % n]
+            pid = planet.body.id
+
+            if allocation[pid] < capacities[pid]:
+                allocation[pid] += 1
+                remaining -= 1
+
+            # Если все планеты заполнены до capacity, прекращаем
+            if all(allocation[p.body.id] >= capacities[p.body.id] for p in eligible_planets):
+                break
+
+            idx += 1
+
+        return allocation
     # -------------------------
     # ОДИНАРНЫЙ КОРЕНЬ
     # -------------------------
     def generate_single_root_system(
-        self,
-        counts: dict[BodyType, int],
-        root_type: BodyType,
+            self,
+            counts: dict[BodyType, int],
+            root_type: BodyType,
     ) -> SystemNode:
         root_body = self.create_body(root_type, f"{root_type}_Root")
         root = SystemNode(name=f"{root_body.name}_System")
 
-        # Фиктивный orbit-node для корневого тела, чтобы его можно было потом визуализировать единообразно
         root_body_node = OrbitNode(body=root_body, orbit=None, parent=root)
         root.add_child(root_body_node)
 
         star_count = counts.get("Star", 0)
         planet_count = counts.get("Planet", 0)
+        moon_count_total = counts.get("Moon", 0)
 
-        # Если корень сам звезда, то остальные звезды идут как спутники/компаньоны вокруг нее
         if root_type == "Star":
             star_count = max(0, star_count - 1)
-        elif root_type == "BH":
-            pass
 
-        # Звезды вокруг корня
         star_nodes: list[OrbitNode] = []
+
         if star_count > 0:
-            star_bodies = [self.create_body("Star", f"Star_{i+1}") for i in range(star_count)]
-            star_specs = [("Star", body) for body in star_bodies]
+            star_bodies = [self.create_body("Star", f"Star_{i + 1}") for i in range(star_count)]
+
+            star_specs = sorted(
+                [("Star", body) for body in star_bodies],
+                key=lambda x: x[1].mass,
+                reverse=True
+            )
 
             star_orbits = self.sample_non_intersecting_orbits(
                 parent_mass=root_body.mass,
                 children_specs=star_specs,
-                base_min_distance=root_body.radius * 10.0,
-                max_distance=self.presets["Star"].orbit_distance.max,
+                base_min_distance=root_body.radius * 8.0,
+                max_distance=max(
+                    self.presets["Star"].orbit_distance.max,
+                    root_body.radius * 18.0
+                ),
+                clearance_factor=2.0,
+                allow_expand_beyond_preset=True,
+                expansion_factor=1.6,
+                compactness=0.12,
             )
 
-            for body, orbit in zip(star_bodies, star_orbits):
+            for (_, body), orbit in zip(star_specs, star_orbits):
                 node = OrbitNode(body=body, orbit=orbit, parent=root)
                 root.add_child(node)
                 star_nodes.append(node)
 
-        # Планеты вокруг корня
         planet_nodes: list[OrbitNode] = []
+
         if planet_count > 0:
-            planet_bodies = [self.create_body("Planet", f"Planet_{i+1}") for i in range(planet_count)]
-            planet_specs = [("Planet", body) for body in planet_bodies]
+            planet_bodies = [self.create_body("Planet", f"Planet_{i + 1}") for i in range(planet_count)]
+
+            planet_specs = sorted(
+                [("Planet", body) for body in planet_bodies],
+                key=lambda x: x[1].mass,
+                reverse=True
+            )
+
+            base_min_distance = root_body.radius * 14.0
+
+            if star_nodes:
+                stars_outer_edge = max(
+                    self.apoapsis(node.orbit.semi_major_axis, node.orbit.eccentricity)
+                    for node in star_nodes
+                    if node.orbit is not None
+                )
+                base_min_distance = max(
+                    base_min_distance,
+                    stars_outer_edge + root_body.radius * 8.0
+                )
 
             planet_orbits = self.sample_non_intersecting_orbits(
                 parent_mass=root_body.mass,
                 children_specs=planet_specs,
-                base_min_distance=root_body.radius * 14.0,
-                max_distance=self.presets["Planet"].orbit_distance.max,
+                base_min_distance=base_min_distance,
+                max_distance=max(
+                    self.presets["Planet"].orbit_distance.max,
+                    base_min_distance * 2.2
+                ),
+                clearance_factor=2.0,
+                allow_expand_beyond_preset=True,
+                expansion_factor=1.6,
+                compactness=0.10,
             )
 
-            for body, orbit in zip(planet_bodies, planet_orbits):
+            for (_, body), orbit in zip(planet_specs, planet_orbits):
                 node = OrbitNode(body=body, orbit=orbit, parent=root)
                 root.add_child(node)
                 planet_nodes.append(node)
 
-        # Луны вокруг планет
         self.attach_moons_to_planets(
             planets=planet_nodes,
             central_mass=root_body.mass,
+            total_moons=moon_count_total,
         )
 
         return root
-
     # -------------------------
     # БИНАРНЫЙ КОРЕНЬ
     # -------------------------
     def generate_binary_root_system(
-        self,
-        counts: dict[BodyType, int],
-        primary_type: BodyType,
-        secondary_type: BodyType,
+            self,
+            counts: dict[BodyType, int],
+            primary_type: BodyType,
+            secondary_type: BodyType,
     ) -> BinarySystemRoot:
         primary_body = self.create_body(primary_type, f"{primary_type}_Primary")
         secondary_body = self.create_body(secondary_type, f"{secondary_type}_Secondary")
 
-        # Разделение тел
         if primary_type == "Star":
             counts["Star"] = max(0, counts.get("Star", 0) - 1)
         if secondary_type == "Star":
@@ -384,18 +509,26 @@ class SystemGenerator:
         if secondary_type == "BH":
             counts["BH"] = max(0, counts.get("BH", 0) - 1)
 
-        # Подбираем расстояние между телами бинарной пары так, чтобы они не пересекались
+        planet_count = counts.get("Planet", 0)
+        moon_count_total = counts.get("Moon", 0)
+
         min_sep = (primary_body.radius + secondary_body.radius) * 8.0
-        max_sep = max(
+
+        preset_max_sep = max(
             self.presets[primary_type].orbit_distance.max if primary_type in self.presets else min_sep * 2.0,
             self.presets[secondary_type].orbit_distance.max if secondary_type in self.presets else min_sep * 2.0,
             min_sep * 2.0
         )
+
+        max_sep = min(preset_max_sep, min_sep * 4.0)
         separation = self.rng.uniform(min_sep, max_sep)
 
-        r1, r2 = self.binary_distances_to_barycenter(primary_body.mass, secondary_body.mass, separation)
+        r1, r2 = self.binary_distances_to_barycenter(
+            primary_body.mass,
+            secondary_body.mass,
+            separation
+        )
 
-        # Для устойчивости даем одинаковый e / inc, фазы сдвинуты на pi
         pair_e = self.rng.uniform(0.0, 0.25)
         pair_inc = self.rng.uniform(0.0, 25.0)
         pair_speed = self.rng.uniform(0.01, 0.05)
@@ -412,6 +545,7 @@ class SystemGenerator:
                 phase=pair_phase,
             ),
         )
+
         secondary_node = OrbitNode(
             body=secondary_body,
             orbit=self.create_orbit(
@@ -433,72 +567,122 @@ class SystemGenerator:
         primary_node.parent = root
         secondary_node.parent = root
 
-        # Дополнительные звезды вокруг общего барицентра, если их больше двух
-        extra_star_count = counts.get("Star", 0)
-        if extra_star_count > 0:
-            extra_bodies = [self.create_body("Star", f"Star_Extra_{i+1}") for i in range(extra_star_count)]
-            extra_specs = [("Star", body) for body in extra_bodies]
+        binary_outer_min = max(
+            self.apoapsis(primary_node.orbit.semi_major_axis, primary_node.orbit.eccentricity),
+            self.apoapsis(secondary_node.orbit.semi_major_axis, secondary_node.orbit.eccentricity),
+        ) + self.orbit_clearance(primary_body.radius, secondary_body.radius, 8.0)
 
-            binary_outer_min = max(
-                self.apoapsis(primary_node.orbit.semi_major_axis, primary_node.orbit.eccentricity),
-                self.apoapsis(secondary_node.orbit.semi_major_axis, secondary_node.orbit.eccentricity),
-            ) + self.orbit_clearance(primary_body.radius, secondary_body.radius, 8.0)
+        extra_star_count = counts.get("Star", 0)
+        extra_star_nodes: list[OrbitNode] = []
+
+        if extra_star_count > 0:
+            extra_bodies = [self.create_body("Star", f"Star_Extra_{i + 1}") for i in range(extra_star_count)]
+
+            extra_specs = sorted(
+                [("Star", body) for body in extra_bodies],
+                key=lambda x: x[1].mass,
+                reverse=True
+            )
 
             extra_orbits = self.sample_non_intersecting_orbits(
                 parent_mass=primary_body.mass + secondary_body.mass,
                 children_specs=extra_specs,
                 base_min_distance=binary_outer_min,
-                max_distance=self.presets["Star"].orbit_distance.max * 2.0,
+                max_distance=max(
+                    self.presets["Star"].orbit_distance.max * 1.3,
+                    binary_outer_min * 1.8
+                ),
+                clearance_factor=2.0,
+                allow_expand_beyond_preset=True,
+                expansion_factor=1.5,
+                compactness=0.10,
             )
 
-            for body, orbit in zip(extra_bodies, extra_orbits):
+            for (_, body), orbit in zip(extra_specs, extra_orbits):
                 node = OrbitNode(body=body, orbit=orbit, parent=root)
                 root.add_child(node)
+                extra_star_nodes.append(node)
 
-        # Планеты вокруг общего барицентра
-        planet_count = counts.get("Planet", 0)
+        planets_base_min = binary_outer_min
+
+        if extra_star_nodes:
+            extra_stars_outer_edge = max(
+                self.apoapsis(node.orbit.semi_major_axis, node.orbit.eccentricity)
+                for node in extra_star_nodes
+                if node.orbit is not None
+            )
+            planets_base_min = max(
+                planets_base_min,
+                extra_stars_outer_edge + max(primary_body.radius, secondary_body.radius) * 8.0
+            )
+
         planet_nodes: list[OrbitNode] = []
 
         if planet_count > 0:
-            planet_bodies = [self.create_body("Planet", f"Planet_{i+1}") for i in range(planet_count)]
-            planet_specs = [("Planet", body) for body in planet_bodies]
+            planet_bodies = [self.create_body("Planet", f"Planet_{i + 1}") for i in range(planet_count)]
 
-            binary_outer_min = max(
-                self.apoapsis(primary_node.orbit.semi_major_axis, primary_node.orbit.eccentricity),
-                self.apoapsis(secondary_node.orbit.semi_major_axis, secondary_node.orbit.eccentricity),
-            ) + self.orbit_clearance(primary_body.radius, secondary_body.radius, 10.0)
+            planet_specs = sorted(
+                [("Planet", body) for body in planet_bodies],
+                key=lambda x: x[1].mass,
+                reverse=True
+            )
 
             planet_orbits = self.sample_non_intersecting_orbits(
                 parent_mass=primary_body.mass + secondary_body.mass,
                 children_specs=planet_specs,
-                base_min_distance=binary_outer_min,
-                max_distance=self.presets["Planet"].orbit_distance.max * 2.0,
+                base_min_distance=planets_base_min,
+                max_distance=max(
+                    self.presets["Planet"].orbit_distance.max * 1.5,
+                    planets_base_min * 2.0
+                ),
+                clearance_factor=2.0,
+                allow_expand_beyond_preset=True,
+                expansion_factor=1.6,
+                compactness=0.08,
             )
 
-            for body, orbit in zip(planet_bodies, planet_orbits):
+            for (_, body), orbit in zip(planet_specs, planet_orbits):
                 node = OrbitNode(body=body, orbit=orbit, parent=root)
                 root.add_child(node)
                 planet_nodes.append(node)
 
-        # Луны у планет
         self.attach_moons_to_planets(
             planets=planet_nodes,
             central_mass=primary_body.mass + secondary_body.mass,
+            total_moons=moon_count_total,
         )
 
         return root
-
     # -------------------------
     # ЛУНЫ
     # -------------------------
-    def attach_moons_to_planets(self, planets: list[OrbitNode], central_mass: float) -> None:
+    def attach_moons_to_planets(
+            self,
+            planets: list[OrbitNode],
+            central_mass: float,
+            total_moons: int,
+    ) -> None:
+        """
+        Распределяет общее число лун по всей системе между планетами
+        относительно равномерно, затем генерирует орбиты этих лун.
+        """
+        if total_moons <= 0 or not planets:
+            return
+
+        moon_distribution = self.distribute_global_moons(
+            planets=planets,
+            total_moons=total_moons,
+            central_mass=central_mass,
+        )
+
+        if not moon_distribution:
+            return
+
         moon_index = 1
 
         for planet_node in planets:
-            moon_count_range = self.presets["Planet"].moon_count
-            moon_count = moon_count_range.sample(self.rng)
-
-            if moon_count <= 0 or planet_node.orbit is None:
+            assigned_moons = moon_distribution.get(planet_node.body.id, 0)
+            if assigned_moons <= 0 or planet_node.orbit is None:
                 continue
 
             hill = self.hill_radius(
@@ -508,42 +692,132 @@ class SystemGenerator:
                 parent_mass=central_mass,
             )
 
-            moon_min_dist = max(
-                self.presets["Moon"].orbit_distance.min,
-                planet_node.body.radius * 3.0
-            )
-            moon_max_dist = min(
-                self.presets["Moon"].orbit_distance.max,
-                hill * 0.4
-            )
-
-            if moon_min_dist >= moon_max_dist:
-                continue
-
             moon_bodies = [
                 self.create_body("Moon", f"Moon_{moon_index + i}")
-                for i in range(moon_count)
+                for i in range(assigned_moons)
             ]
-            moon_index += moon_count
+            moon_index += assigned_moons
 
-            moon_specs = [("Moon", body) for body in moon_bodies]
+            moon_specs = sorted(
+                [("Moon", body) for body in moon_bodies],
+                key=lambda x: x[1].mass,
+                reverse=True
+            )
 
-            try:
-                moon_orbits = self.sample_non_intersecting_orbits(
-                    parent_mass=planet_node.body.mass,
-                    children_specs=moon_specs,
-                    base_min_distance=moon_min_dist,
-                    max_distance=moon_max_dist,
-                    clearance_factor=3.0,
-                )
-            except RuntimeError:
-                # Если не влезли, просто пропускаем лишние луны.
-                continue
+            moon_orbits = self.sample_non_intersecting_moon_orbits(
+                moon_specs=moon_specs,
+                planet_radius=planet_node.body.radius,
+                hill_radius_limit=hill,
+            )
 
-            for body, orbit in zip(moon_bodies, moon_orbits):
+            for (_, body), orbit in zip(moon_specs, moon_orbits):
                 moon_node = OrbitNode(body=body, orbit=orbit, parent=planet_node)
                 planet_node.add_child(moon_node)
 
+    def sample_non_intersecting_moon_orbits(
+            self,
+            moon_specs: list[tuple[BodyType, Body]],
+            planet_radius: float,
+            hill_radius_limit: float,
+    ) -> list[OrbitalParams]:
+        """
+        Специальный генератор орбит для лун.
+        Делает более плотную, но безопасную упаковку без пересечений.
+
+        Отличия от общей функции:
+        - эксцентриситеты лун принудительно маленькие
+        - каждая следующая луна ставится после внешнего края предыдущей
+        - проверка идет по реальным q/Q уже созданных лун
+        """
+        result: list[OrbitalParams] = []
+
+        placed_ranges: list[tuple[float, float, float]] = []
+        # tuple = (q, Q, radius)
+
+        current_min = max(
+            self.presets["Moon"].orbit_distance.min,
+            planet_radius * 3.0
+        )
+
+        max_allowed = min(
+            self.presets["Moon"].orbit_distance.max,
+            hill_radius_limit * 0.4
+        )
+
+        if current_min >= max_allowed:
+            return result
+
+        for idx, (_, moon_body) in enumerate(moon_specs):
+            success = False
+
+            # Зазор для следующей луны
+            # Делаем больше, чем раньше, чтобы орбиты визуально не слипались
+            inner_gap = max(
+                0.6,
+                (moon_body.radius * 4.0)
+            )
+
+            required_min_a = current_min + inner_gap
+
+            if required_min_a >= max_allowed:
+                break
+
+            for _ in range(400):
+                # Для лун делаем маленький e, иначе эллипсы начнут лезть друг в друга
+                e = self.rng.uniform(0.0, min(0.03, self.presets["Moon"].eccentricity.max))
+                inc = self.presets["Moon"].inclination_deg.sample(self.rng)
+                speed = self.presets["Moon"].orbit_speed.sample(self.rng)
+                phase = self.rng.uniform(0.0, 2.0 * math.pi)
+
+                # Берем орбиту близко к минимуму, а не по всему диапазону
+                local_span = max(0.8, (max_allowed - required_min_a) * 0.08)
+                local_max_a = min(max_allowed, required_min_a + local_span)
+
+                if required_min_a >= local_max_a:
+                    continue
+
+                a = self.rng.uniform(required_min_a, local_max_a)
+
+                q = self.periapsis(a, e)
+                Q = self.apoapsis(a, e)
+
+                # Проверяем пересечение со ВСЕМИ уже размещенными лунами
+                intersects = False
+                for existing_q, existing_Q, existing_radius in placed_ranges:
+                    safety_gap = max(
+                        0.8,
+                        (existing_radius + moon_body.radius) * 3.5
+                    )
+
+                    # интервалы [q, Q] не должны пересекаться с запасом
+                    if not (Q + safety_gap < existing_q or q > existing_Q + safety_gap):
+                        intersects = True
+                        break
+
+                if intersects:
+                    continue
+
+                orbit = OrbitalParams(
+                    semi_major_axis=a,
+                    eccentricity=e,
+                    inclination_deg=inc,
+                    angular_speed=speed,
+                    phase=phase,
+                )
+
+                result.append(orbit)
+                placed_ranges.append((q, Q, moon_body.radius))
+
+                # Следующую луну начинаем после внешнего края этой
+                current_min = Q + max(1.0, moon_body.radius * 4.0)
+
+                success = True
+                break
+
+            if not success:
+                break
+
+        return result
     # -------------------------
     # ОСНОВНОЙ generate_system()
     # -------------------------
@@ -877,7 +1151,7 @@ counts = {
     "BH": 1,
     "Star": 3,
     "Planet": 5,
-    "Moon": 0,
+    "Moon": 6,
 }
 
 generator = SystemGenerator(seed=seed, presets=presets)
