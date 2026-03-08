@@ -30,15 +30,6 @@ class RangeF:
         return rng.uniform(self.min, self.max)
 
 
-@dataclass
-class RangeI:
-    min: int
-    max: int
-
-    def sample(self, rng: random.Random) -> int:
-        return rng.randint(self.min, self.max)
-
-
 # =========================================================
 # ПРЕСЕТЫ
 # =========================================================
@@ -51,7 +42,6 @@ class BodyPreset:
     inclination_deg: RangeF
     orbit_distance: RangeF
     orbit_speed: RangeF
-    moon_count: RangeI = field(default_factory=lambda: RangeI(0, 0))
 
 
 # =========================================================
@@ -112,7 +102,7 @@ class BinarySystemRoot:
     primary: OrbitNode
     secondary: OrbitNode
     children: List[OrbitNode] = field(default_factory=list)
-    show_barycenter: bool = False  # для чистой звёздной пары не выпячиваем пустую точку
+    show_barycenter: bool = False
 
     def get_world_position(self) -> np.ndarray:
         return np.zeros(3, dtype=float)
@@ -212,7 +202,7 @@ class SystemGenerator:
         return r1, r2
 
     # -------------------------
-    # ЛУНЫ: распределение и capacity
+    # ЛУНЫ: оценка вместимости
     # -------------------------
     def estimate_moon_capacity(self, planet_node: OrbitNode, central_mass: float) -> int:
         if planet_node.orbit is None:
@@ -244,12 +234,19 @@ class SystemGenerator:
         capacity = int(usable_span // avg_gap)
         return max(0, min(capacity, 8))
 
+    # -------------------------
+    # ЛУНЫ: равномерное распределение по системе
+    # -------------------------
     def distribute_global_moons(
         self,
         planets: list[OrbitNode],
         total_moons: int,
         central_mass: float,
     ) -> dict[int, int]:
+        """
+        total_moons = общее число лун на ВСЮ систему.
+        Возвращает {planet_id: число_лун_для_этой_планеты}.
+        """
         if total_moons <= 0 or not planets:
             return {}
 
@@ -380,7 +377,7 @@ class SystemGenerator:
 
         star_count = counts.get("Star", 0)
         planet_count = counts.get("Planet", 0)
-        moon_count_total = counts.get("Moon", 0)
+        total_moons = counts.get("Moon", 0)
 
         if root_type == "Star":
             star_count = max(0, star_count - 1)
@@ -461,7 +458,7 @@ class SystemGenerator:
         self.attach_moons_to_planets(
             planets=planet_nodes,
             central_mass=root_body.mass,
-            total_moons=moon_count_total,
+            total_moons=total_moons,
         )
 
         return root
@@ -488,11 +485,8 @@ class SystemGenerator:
             counts["BH"] = max(0, counts.get("BH", 0) - 1)
 
         planet_count = counts.get("Planet", 0)
-        moon_count_total = counts.get("Moon", 0)
+        total_moons = counts.get("Moon", 0)
 
-        # Для двух звезд по умолчанию делаем КРУГОВУЮ бинарную пару,
-        # чтобы не было уродских отдельных эллипсов вокруг красного крестика.
-        # Физически это всё равно орбита вокруг общего центра масс, просто e=0.
         is_star_star_binary = primary_type == "Star" and secondary_type == "Star"
 
         min_sep = (primary_body.radius + secondary_body.radius) * 8.0
@@ -549,7 +543,7 @@ class SystemGenerator:
             name="BinaryBarycenter",
             primary=primary_node,
             secondary=secondary_node,
-            show_barycenter=not is_star_star_binary,  # для star-star не рисуем центр как “пустую штуку”
+            show_barycenter=not is_star_star_binary,
         )
 
         primary_node.parent = root
@@ -637,7 +631,7 @@ class SystemGenerator:
         self.attach_moons_to_planets(
             planets=planet_nodes,
             central_mass=primary_body.mass + secondary_body.mass,
-            total_moons=moon_count_total,
+            total_moons=total_moons,
         )
 
         return root
@@ -651,6 +645,9 @@ class SystemGenerator:
         central_mass: float,
         total_moons: int,
     ) -> None:
+        """
+        total_moons = ОБЩЕЕ количество лун на ВСЮ систему.
+        """
         if total_moons <= 0 or not planets:
             return
 
@@ -959,11 +956,6 @@ class VisualOrbitalBody:
         return np.zeros(3, dtype=float)
 
     def _get_sibling_min_axis(self) -> float:
-        """
-        Находит минимальную полуось среди sibling-ов того же типа
-        у того же родителя. Это будет опорная внутренняя орбита,
-        относительно которой сжимаем/раздвигаем остальные.
-        """
         if self.node.orbit is None:
             return 0.0
 
@@ -1002,15 +994,6 @@ class VisualOrbitalBody:
         return min(child.orbit.semi_major_axis for child in siblings if child.orbit is not None)
 
     def _get_scaled_axis(self, distance_scale: dict[BodyType, float]) -> float:
-        """
-        Масштабирование полуоси в зависимости от типа тела.
-
-        Логика:
-        - Planet: раздвигаем/сжимаем относительно самой внутренней планеты в группе
-        - Moon: масштабируем напрямую от планеты, чтобы moon distance всегда работал,
-                даже если у планеты всего одна луна
-        - Star/BH: обычный прямой масштаб от центра
-        """
         if self.node.orbit is None:
             return 0.0
 
@@ -1025,7 +1008,6 @@ class VisualOrbitalBody:
         if body_type == "Moon":
             return raw_a * scale
 
-        # Для звезд и прочего обычный масштаб
         return raw_a * scale
 
     def get_world_position(
@@ -1088,6 +1070,7 @@ class VisualOrbitalBody:
                 self.orbit_artist.set_data(x, y)
                 self.orbit_artist.set_3d_properties(z)
 
+
 # =========================================================
 # ПЕЧАТЬ СТРУКТУРЫ
 # =========================================================
@@ -1137,7 +1120,6 @@ presets = {
         inclination_deg=RangeF(0.0, 10.0),
         orbit_distance=RangeF(20.0, 100.0),
         orbit_speed=RangeF(0.01, 0.03),
-        moon_count=RangeI(0, 0),
     ),
     "Star": BodyPreset(
         body_type="Star",
@@ -1147,7 +1129,6 @@ presets = {
         inclination_deg=RangeF(0.0, 20.0),
         orbit_distance=RangeF(20.0, 120.0),
         orbit_speed=RangeF(0.01, 0.05),
-        moon_count=RangeI(0, 0),
     ),
     "Planet": BodyPreset(
         body_type="Planet",
@@ -1157,7 +1138,6 @@ presets = {
         inclination_deg=RangeF(0.0, 18.0),
         orbit_distance=RangeF(40.0, 260.0),
         orbit_speed=RangeF(0.003, 0.02),
-        moon_count=RangeI(0, 4),
     ),
     "Moon": BodyPreset(
         body_type="Moon",
@@ -1167,7 +1147,6 @@ presets = {
         inclination_deg=RangeF(0.0, 20.0),
         orbit_distance=RangeF(1.5, 16.0),
         orbit_speed=RangeF(0.04, 0.18),
-        moon_count=RangeI(0, 0),
     ),
 }
 
@@ -1181,7 +1160,7 @@ counts = {
     "BH": 0,
     "Star": 2,
     "Planet": 5,
-    "Moon": 6,
+    "Moon": 2,
 }
 
 generator = SystemGenerator(seed=seed, presets=presets)
@@ -1217,7 +1196,6 @@ except Exception:
 
 ax.view_init(elev=24, azim=35)
 
-# Барицентр рисуем только там, где он реально нужен как визуальный ориентир
 show_bary = not (isinstance(root, BinarySystemRoot) and not root.show_barycenter)
 if show_bary:
     bary_artist, = ax.plot([0], [0], [0], "r+", markersize=12)
@@ -1315,3 +1293,5 @@ ani = FuncAnimation(
 )
 
 plt.show()
+
+
