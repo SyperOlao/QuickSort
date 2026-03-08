@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib
+
 matplotlib.use("TkAgg")
 
 import matplotlib.pyplot as plt
@@ -39,7 +40,7 @@ def kepler_local_position(a: float, e: float, inc_deg: float, M: float) -> np.nd
     E = solve_kepler(M, e)
 
     x_orb = a * (np.cos(E) - e)
-    y_orb = a * np.sqrt(1 - e**2) * np.sin(E)
+    y_orb = a * np.sqrt(1 - e ** 2) * np.sin(E)
 
     inc = np.radians(inc_deg)
 
@@ -57,7 +58,7 @@ def kepler_local_curve(a: float, e: float, inc_deg: float, num: int = 400):
     E_vals = np.linspace(0, 2 * np.pi, num)
 
     x_orb = a * (np.cos(E_vals) - e)
-    y_orb = a * np.sqrt(1 - e**2) * np.sin(E_vals)
+    y_orb = a * np.sqrt(1 - e ** 2) * np.sin(E_vals)
 
     inc = np.radians(inc_deg)
 
@@ -73,17 +74,18 @@ def kepler_local_curve(a: float, e: float, inc_deg: float, num: int = 400):
 # =========================================================
 @dataclass
 class OrbitParams:
-    a: float                  # большая полуось
-    e: float                  # эксцентриситет
-    inc_deg: float            # наклон
-    angular_speed: float      # скорость изменения средней аномалии
-    phase: float = 0.0        # фазовый сдвиг
+    a: float  # большая полуось
+    e: float  # эксцентриситет
+    inc_deg: float  # наклон
+    angular_speed: float  # скорость изменения средней аномалии
+    phase: float = 0.0  # фазовый сдвиг
 
 
 class Anchor:
     """
     Неподвижная точка. Например, корневой барицентр.
     """
+
     def __init__(self, name: str, position=(0.0, 0.0, 0.0)):
         self.name = name
         self.position = np.array(position, dtype=float)
@@ -100,17 +102,18 @@ class OrbitalBody:
     - луна
     Всё это просто тело на орбите вокруг parent.
     """
+
     def __init__(
-        self,
-        name: str,
-        parent,
-        orbit: OrbitParams,
-        color: str = "b",
-        marker: str = "o",
-        size: int = 6,
-        orbit_style: str = "--",
-        orbit_alpha: float = 0.8,
-        draw_orbit: bool = True
+            self,
+            name: str,
+            parent,
+            orbit: OrbitParams,
+            color: str = "b",
+            marker: str = "o",
+            size: int = 6,
+            orbit_style: str = "--",
+            orbit_alpha: float = 0.8,
+            draw_orbit: bool = True
     ):
         self.name = name
         self.parent = parent
@@ -205,7 +208,6 @@ try:
 except Exception:
     pass
 
-
 # =========================================================
 # КОРНЕВОЙ БАРИЦЕНТР
 # =========================================================
@@ -213,7 +215,6 @@ root_barycenter = Anchor("RootBarycenter", (0.0, 0.0, 0.0))
 
 # рисуем сам барицентр
 bary_artist, = ax.plot([0], [0], [0], "r+", markersize=12)
-
 
 # =========================================================
 # ПАРАМЕТРЫ
@@ -233,7 +234,6 @@ INCL_MOON_1 = 30.0
 BIN_SPEED = 0.045
 PLANET_SPEED = 0.012
 MOON_SPEED = 0.08
-
 
 # =========================================================
 # ОБЪЕКТЫ
@@ -281,14 +281,13 @@ moon1 = OrbitalBody(
 
 bodies.extend([star1, star2, planet1, moon1])
 
-
 # =========================================================
 # ХОЧЕШЬ ДОБАВИТЬ НОВУЮ ПЛАНЕТУ? ВОТ ТАК:
 # =========================================================
 planet2 = OrbitalBody(
     name="Planet 2",
     parent=root_barycenter,
-    orbit=OrbitParams(a=48.0, e=0.08, inc_deg=10.0, angular_speed=0.008, phase=1.5),
+    orbit=OrbitParams(a=48.0, e=0.08, inc_deg=INCL_BIN, angular_speed=PLANET_SPEED, phase=1.5),
     color="violet",
     marker="o",
     size=5
@@ -297,7 +296,7 @@ planet2 = OrbitalBody(
 moon2 = OrbitalBody(
     name="Moon 2",
     parent=planet2,
-    orbit=OrbitParams(a=3.0, e=0.0, inc_deg=15.0, angular_speed=0.11, phase=0.7),
+    orbit=OrbitParams(a=3.0, e=0.0, inc_deg=INCL_MOON_1, angular_speed=MOON_SPEED, phase=0.7),
     color="red",
     marker="o",
     size=3
@@ -305,13 +304,11 @@ moon2 = OrbitalBody(
 
 bodies.extend([planet2, moon2])
 
-
 # =========================================================
 # СОЗДАНИЕ ГРАФИЧЕСКИХ ОБЪЕКТОВ
 # =========================================================
 for body in bodies:
     body.create_artists(ax)
-
 
 # =========================================================
 # СЛАЙДЕРЫ
@@ -324,9 +321,9 @@ start_y = 0.12
 
 plt.subplots_adjust(bottom=0.25)
 
-ax_speed    = fig.add_axes((slider_left, start_y,                  slider_width, slider_height))
-ax_planet_a = fig.add_axes((slider_left, start_y - slider_gap,     slider_width, slider_height))
-ax_moon_a   = fig.add_axes((slider_left, start_y - 2 * slider_gap, slider_width, slider_height))
+ax_speed = fig.add_axes((slider_left, start_y, slider_width, slider_height))
+ax_planet_a = fig.add_axes((slider_left, start_y - slider_gap, slider_width, slider_height))
+ax_moon_a = fig.add_axes((slider_left, start_y - 2 * slider_gap, slider_width, slider_height))
 
 slider_speed = Slider(ax_speed, "speed", 0.1, 5.0, valinit=1.0)
 slider_planet_a = Slider(ax_planet_a, "planet orbit", 20.0, 80.0, valinit=A_PLANET_1)
@@ -357,8 +354,9 @@ def update(frame):
 
     # можно менять полуось первой планеты слайдером
     planet1.orbit.a = slider_planet_a.val
+    planet2.orbit.a = slider_planet_a.val * 1.5
     moon1.orbit.a = slider_moon_a.val
-    moon2.orbit.a = slider_planet_a.val
+    moon2.orbit.a = slider_moon_a.val
     # dt здесь по сути "масштаб времени", а не физические секунды
     dt = speed
 
