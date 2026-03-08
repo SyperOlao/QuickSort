@@ -95,7 +95,7 @@ class SystemNode:
 class OrbitNode:
     body: Body
     orbit: Optional[OrbitalParams] = None
-    parent: Optional[Union["OrbitNode", SystemNode]] = None
+    parent: Optional[Union["OrbitNode", "SystemNode", "BinarySystemRoot"]] = None
     children: List["OrbitNode"] = field(default_factory=list)
 
     def add_child(self, child: "OrbitNode") -> None:
@@ -103,7 +103,6 @@ class OrbitNode:
         child.parent = self
 
     def get_world_position(self) -> np.ndarray:
-        # Для генератора не используется, позиция считается в визуализаторе
         return np.zeros(3, dtype=float)
 
 
@@ -112,7 +111,8 @@ class BinarySystemRoot:
     name: str
     primary: OrbitNode
     secondary: OrbitNode
-    children: List[OrbitNode] = field(default_factory=list)  # circumbinary planets etc.
+    children: List[OrbitNode] = field(default_factory=list)
+    show_barycenter: bool = False  # для чистой звёздной пары не выпячиваем пустую точку
 
     def get_world_position(self) -> np.ndarray:
         return np.zeros(3, dtype=float)
@@ -211,12 +211,10 @@ class SystemGenerator:
         r2 = separation * (m1 / total)
         return r1, r2
 
+    # -------------------------
+    # ЛУНЫ: распределение и capacity
+    # -------------------------
     def estimate_moon_capacity(self, planet_node: OrbitNode, central_mass: float) -> int:
-        """
-        Грубая оценка, сколько лун может влезть у планеты.
-        Считаем по доступному диапазону орбит между минимальной дистанцией
-        и допустимой частью Hill sphere.
-        """
         if planet_node.orbit is None:
             return 0
 
@@ -240,37 +238,68 @@ class SystemGenerator:
             return 0
 
         usable_span = moon_max_dist - moon_min_dist
-
-        # Грубая оценка среднего места на одну луну
         avg_moon_radius = (self.presets["Moon"].radius.min + self.presets["Moon"].radius.max) * 0.5
         avg_gap = max(1.0, avg_moon_radius * 6.0)
 
         capacity = int(usable_span // avg_gap)
-
-        # Хоть какая-то верхняя отсечка, чтобы мелкая сцена не превращалась в мусорку
         return max(0, min(capacity, 8))
+
+    def distribute_global_moons(
+        self,
+        planets: list[OrbitNode],
+        total_moons: int,
+        central_mass: float,
+    ) -> dict[int, int]:
+        if total_moons <= 0 or not planets:
+            return {}
+
+        capacities: dict[int, int] = {}
+        eligible_planets: list[OrbitNode] = []
+
+        for planet in planets:
+            cap = self.estimate_moon_capacity(planet, central_mass)
+            if cap > 0:
+                capacities[planet.body.id] = cap
+                eligible_planets.append(planet)
+
+        if not eligible_planets:
+            return {}
+
+        allocation = {planet.body.id: 0 for planet in eligible_planets}
+
+        remaining = total_moons
+        idx = 0
+        n = len(eligible_planets)
+
+        while remaining > 0:
+            planet = eligible_planets[idx % n]
+            pid = planet.body.id
+
+            if allocation[pid] < capacities[pid]:
+                allocation[pid] += 1
+                remaining -= 1
+
+            if all(allocation[p.body.id] >= capacities[p.body.id] for p in eligible_planets):
+                break
+
+            idx += 1
+
+        return allocation
+
     # -------------------------
     # ПОДБОР НЕПЕРЕСЕКАЮЩИХСЯ ОРБИТ
     # -------------------------
     def sample_non_intersecting_orbits(
-            self,
-            parent_mass: float,
-            children_specs: list[tuple[BodyType, Body]],
-            base_min_distance: float,
-            max_distance: float,
-            clearance_factor: float = 2.2,
-            allow_expand_beyond_preset: bool = True,
-            expansion_factor: float = 1.8,
-            compactness: float = 0.18,
+        self,
+        parent_mass: float,
+        children_specs: list[tuple[BodyType, Body]],
+        base_min_distance: float,
+        max_distance: float,
+        clearance_factor: float = 2.2,
+        allow_expand_beyond_preset: bool = True,
+        expansion_factor: float = 1.8,
+        compactness: float = 0.18,
     ) -> list[OrbitalParams]:
-        """
-        Генерация непересекающихся орбит вокруг одного родителя.
-
-        Главное отличие:
-        - орбиты не разбрасываются по всему диапазону
-        - новые тела ставятся близко к минимально допустимой дистанции
-        - compactness определяет, насколько плотно они будут сидеть
-        """
         result: list[OrbitalParams] = []
         prev_apo = base_min_distance
 
@@ -301,8 +330,6 @@ class SystemGenerator:
                     f"effective_max_distance={effective_max_distance:.2f}"
                 )
 
-            # Вместо рандома по ВСЕМУ диапазону
-            # разрешаем небольшой локальный люфт около минимума
             local_span = max(5.0, (effective_max_distance - required_min_a) * compactness)
             local_max_a = min(effective_max_distance, required_min_a + local_span)
 
@@ -312,7 +339,6 @@ class SystemGenerator:
                 speed = preset.orbit_speed.sample(self.rng)
                 phase = self.rng.uniform(0.0, 2.0 * math.pi)
 
-                # Берем a близко к required_min_a
                 a = self.rng.uniform(required_min_a, local_max_a)
 
                 q = self.periapsis(a, e)
@@ -338,62 +364,13 @@ class SystemGenerator:
 
         return result
 
-    def distribute_global_moons(
-            self,
-            planets: list[OrbitNode],
-            total_moons: int,
-            central_mass: float,
-    ) -> dict[int, int]:
-        """
-        Равномерно распределяет общее число лун между планетами системы.
-
-        Возвращает:
-            {planet_body_id: moon_count_for_this_planet}
-        """
-        if total_moons <= 0 or not planets:
-            return {}
-
-        capacities: dict[int, int] = {}
-        eligible_planets: list[OrbitNode] = []
-
-        for planet in planets:
-            cap = self.estimate_moon_capacity(planet, central_mass)
-            if cap > 0:
-                capacities[planet.body.id] = cap
-                eligible_planets.append(planet)
-
-        if not eligible_planets:
-            return {}
-
-        allocation = {planet.body.id: 0 for planet in eligible_planets}
-
-        # Сначала базовое равномерное распределение по кругу
-        remaining = total_moons
-        idx = 0
-        n = len(eligible_planets)
-
-        while remaining > 0:
-            planet = eligible_planets[idx % n]
-            pid = planet.body.id
-
-            if allocation[pid] < capacities[pid]:
-                allocation[pid] += 1
-                remaining -= 1
-
-            # Если все планеты заполнены до capacity, прекращаем
-            if all(allocation[p.body.id] >= capacities[p.body.id] for p in eligible_planets):
-                break
-
-            idx += 1
-
-        return allocation
     # -------------------------
     # ОДИНАРНЫЙ КОРЕНЬ
     # -------------------------
     def generate_single_root_system(
-            self,
-            counts: dict[BodyType, int],
-            root_type: BodyType,
+        self,
+        counts: dict[BodyType, int],
+        root_type: BodyType,
     ) -> SystemNode:
         root_body = self.create_body(root_type, f"{root_type}_Root")
         root = SystemNode(name=f"{root_body.name}_System")
@@ -488,14 +465,15 @@ class SystemGenerator:
         )
 
         return root
+
     # -------------------------
     # БИНАРНЫЙ КОРЕНЬ
     # -------------------------
     def generate_binary_root_system(
-            self,
-            counts: dict[BodyType, int],
-            primary_type: BodyType,
-            secondary_type: BodyType,
+        self,
+        counts: dict[BodyType, int],
+        primary_type: BodyType,
+        secondary_type: BodyType,
     ) -> BinarySystemRoot:
         primary_body = self.create_body(primary_type, f"{primary_type}_Primary")
         secondary_body = self.create_body(secondary_type, f"{secondary_type}_Secondary")
@@ -512,14 +490,17 @@ class SystemGenerator:
         planet_count = counts.get("Planet", 0)
         moon_count_total = counts.get("Moon", 0)
 
-        min_sep = (primary_body.radius + secondary_body.radius) * 8.0
+        # Для двух звезд по умолчанию делаем КРУГОВУЮ бинарную пару,
+        # чтобы не было уродских отдельных эллипсов вокруг красного крестика.
+        # Физически это всё равно орбита вокруг общего центра масс, просто e=0.
+        is_star_star_binary = primary_type == "Star" and secondary_type == "Star"
 
+        min_sep = (primary_body.radius + secondary_body.radius) * 8.0
         preset_max_sep = max(
             self.presets[primary_type].orbit_distance.max if primary_type in self.presets else min_sep * 2.0,
             self.presets[secondary_type].orbit_distance.max if secondary_type in self.presets else min_sep * 2.0,
             min_sep * 2.0
         )
-
         max_sep = min(preset_max_sep, min_sep * 4.0)
         separation = self.rng.uniform(min_sep, max_sep)
 
@@ -529,9 +510,15 @@ class SystemGenerator:
             separation
         )
 
-        pair_e = self.rng.uniform(0.0, 0.25)
-        pair_inc = self.rng.uniform(0.0, 25.0)
-        pair_speed = self.rng.uniform(0.01, 0.05)
+        if is_star_star_binary:
+            pair_e = 0.0
+            pair_inc = self.rng.uniform(0.0, 6.0)
+            pair_speed = self.rng.uniform(0.015, 0.04)
+        else:
+            pair_e = self.rng.uniform(0.0, 0.20)
+            pair_inc = self.rng.uniform(0.0, 20.0)
+            pair_speed = self.rng.uniform(0.01, 0.05)
+
         pair_phase = self.rng.uniform(0.0, 2.0 * math.pi)
 
         primary_node = OrbitNode(
@@ -562,6 +549,7 @@ class SystemGenerator:
             name="BinaryBarycenter",
             primary=primary_node,
             secondary=secondary_node,
+            show_barycenter=not is_star_star_binary,  # для star-star не рисуем центр как “пустую штуку”
         )
 
         primary_node.parent = root
@@ -653,19 +641,16 @@ class SystemGenerator:
         )
 
         return root
+
     # -------------------------
     # ЛУНЫ
     # -------------------------
     def attach_moons_to_planets(
-            self,
-            planets: list[OrbitNode],
-            central_mass: float,
-            total_moons: int,
+        self,
+        planets: list[OrbitNode],
+        central_mass: float,
+        total_moons: int,
     ) -> None:
-        """
-        Распределяет общее число лун по всей системе между планетами
-        относительно равномерно, затем генерирует орбиты этих лун.
-        """
         if total_moons <= 0 or not planets:
             return
 
@@ -715,24 +700,13 @@ class SystemGenerator:
                 planet_node.add_child(moon_node)
 
     def sample_non_intersecting_moon_orbits(
-            self,
-            moon_specs: list[tuple[BodyType, Body]],
-            planet_radius: float,
-            hill_radius_limit: float,
+        self,
+        moon_specs: list[tuple[BodyType, Body]],
+        planet_radius: float,
+        hill_radius_limit: float,
     ) -> list[OrbitalParams]:
-        """
-        Специальный генератор орбит для лун.
-        Делает более плотную, но безопасную упаковку без пересечений.
-
-        Отличия от общей функции:
-        - эксцентриситеты лун принудительно маленькие
-        - каждая следующая луна ставится после внешнего края предыдущей
-        - проверка идет по реальным q/Q уже созданных лун
-        """
         result: list[OrbitalParams] = []
-
         placed_ranges: list[tuple[float, float, float]] = []
-        # tuple = (q, Q, radius)
 
         current_min = max(
             self.presets["Moon"].orbit_distance.min,
@@ -747,14 +721,12 @@ class SystemGenerator:
         if current_min >= max_allowed:
             return result
 
-        for idx, (_, moon_body) in enumerate(moon_specs):
+        for _, moon_body in moon_specs:
             success = False
 
-            # Зазор для следующей луны
-            # Делаем больше, чем раньше, чтобы орбиты визуально не слипались
             inner_gap = max(
                 0.6,
-                (moon_body.radius * 4.0)
+                moon_body.radius * 4.0
             )
 
             required_min_a = current_min + inner_gap
@@ -763,13 +735,11 @@ class SystemGenerator:
                 break
 
             for _ in range(400):
-                # Для лун делаем маленький e, иначе эллипсы начнут лезть друг в друга
                 e = self.rng.uniform(0.0, min(0.03, self.presets["Moon"].eccentricity.max))
                 inc = self.presets["Moon"].inclination_deg.sample(self.rng)
                 speed = self.presets["Moon"].orbit_speed.sample(self.rng)
                 phase = self.rng.uniform(0.0, 2.0 * math.pi)
 
-                # Берем орбиту близко к минимуму, а не по всему диапазону
                 local_span = max(0.8, (max_allowed - required_min_a) * 0.08)
                 local_max_a = min(max_allowed, required_min_a + local_span)
 
@@ -781,15 +751,12 @@ class SystemGenerator:
                 q = self.periapsis(a, e)
                 Q = self.apoapsis(a, e)
 
-                # Проверяем пересечение со ВСЕМИ уже размещенными лунами
                 intersects = False
                 for existing_q, existing_Q, existing_radius in placed_ranges:
                     safety_gap = max(
                         0.8,
                         (existing_radius + moon_body.radius) * 3.5
                     )
-
-                    # интервалы [q, Q] не должны пересекаться с запасом
                     if not (Q + safety_gap < existing_q or q > existing_Q + safety_gap):
                         intersects = True
                         break
@@ -807,8 +774,6 @@ class SystemGenerator:
 
                 result.append(orbit)
                 placed_ranges.append((q, Q, moon_body.radius))
-
-                # Следующую луну начинаем после внешнего края этой
                 current_min = Q + max(1.0, moon_body.radius * 4.0)
 
                 success = True
@@ -818,6 +783,7 @@ class SystemGenerator:
                 break
 
         return result
+
     # -------------------------
     # ОСНОВНОЙ generate_system()
     # -------------------------
@@ -830,11 +796,6 @@ class SystemGenerator:
 
         counts = dict(counts)
 
-        # Правила выбора корня:
-        # 1) Если BH >= 2 -> бинарная BH система
-        # 2) Если BH == 1 и Star >= 1 -> бинарная BH + Star
-        # 3) Если Star >= 2 -> бинарная Star + Star
-        # 4) Иначе одиночный корень
         if counts.get("BH", 0) >= 2:
             return self.generate_binary_root_system(counts, "BH", "BH")
 
@@ -898,7 +859,7 @@ def kepler_local_position(a: float, e: float, inc_deg: float, M: float) -> np.nd
     E = solve_kepler(M, e)
 
     x_orb = a * (np.cos(E) - e)
-    y_orb = a * np.sqrt(1 - e**2) * np.sin(E)
+    y_orb = a * np.sqrt(1 - e ** 2) * np.sin(E)
 
     inc = np.radians(inc_deg)
 
@@ -913,7 +874,7 @@ def kepler_local_curve(a: float, e: float, inc_deg: float, num: int = 400):
     E_vals = np.linspace(0, 2 * np.pi, num)
 
     x_orb = a * (np.cos(E_vals) - e)
-    y_orb = a * np.sqrt(1 - e**2) * np.sin(E_vals)
+    y_orb = a * np.sqrt(1 - e ** 2) * np.sin(E_vals)
 
     inc = np.radians(inc_deg)
 
@@ -1070,7 +1031,7 @@ def print_system(root, indent=0):
             print_system(child, indent + 1)
 
     elif isinstance(root, BinarySystemRoot):
-        print(f"{prefix}[BinaryRoot] {root.name}")
+        print(f"{prefix}[BinaryRoot] {root.name} show_barycenter={root.show_barycenter}")
         print_system(root.primary, indent + 1)
         print_system(root.secondary, indent + 1)
         for child in root.children:
@@ -1148,7 +1109,7 @@ presets = {
 seed = 1337
 
 counts = {
-    "BH": 1,
+    "BH": 2,
     "Star": 3,
     "Planet": 5,
     "Moon": 6,
@@ -1187,9 +1148,12 @@ except Exception:
 
 ax.view_init(elev=24, azim=35)
 
-# Рисуем барицентр
-bary_artist, = ax.plot([0], [0], [0], "r+", markersize=12)
-
+# Барицентр рисуем только там, где он реально нужен как визуальный ориентир
+show_bary = not (isinstance(root, BinarySystemRoot) and not root.show_barycenter)
+if show_bary:
+    bary_artist, = ax.plot([0], [0], [0], "r+", markersize=12)
+else:
+    bary_artist, = ax.plot([], [], [], "r+", markersize=0)
 
 for vb in visual_bodies:
     vb.create_artists(ax)
