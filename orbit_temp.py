@@ -10,7 +10,12 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Slider
+import seaborn as sns
 
+sns.set_theme(style="darkgrid")
+
+import mplcyberpunk
+plt.style.use("cyberpunk")
 
 # =========================================================
 # ТИПЫ
