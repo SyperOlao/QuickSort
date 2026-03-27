@@ -1,4 +1,4 @@
-import math
+import math_main
 import random
 from dataclasses import dataclass, field
 from typing import Optional, List, Literal, Union
@@ -179,7 +179,7 @@ class SystemGenerator:
             ),
             phase=(
                 phase if phase is not None
-                else self.rng.uniform(0.0, 2.0 * math.pi)
+                else self.rng.uniform(0.0, 2.0 * math_main.pi)
             ),
         )
 
@@ -339,7 +339,7 @@ class SystemGenerator:
                 e = preset.eccentricity.sample(self.rng)
                 inc = preset.inclination_deg.sample(self.rng)
                 speed = preset.orbit_speed.sample(self.rng)
-                phase = self.rng.uniform(0.0, 2.0 * math.pi)
+                phase = self.rng.uniform(0.0, 2.0 * math_main.pi)
 
                 a = self.rng.uniform(required_min_a, local_max_a)
 
@@ -518,7 +518,7 @@ class SystemGenerator:
             pair_inc = self.rng.uniform(0.0, 20.0)
             pair_speed = self.rng.uniform(0.01, 0.05)
 
-        pair_phase = self.rng.uniform(0.0, 2.0 * math.pi)
+        pair_phase = self.rng.uniform(0.0, 2.0 * math_main.pi)
 
         primary_node = OrbitNode(
             body=primary_body,
@@ -540,7 +540,7 @@ class SystemGenerator:
                 eccentricity=pair_e,
                 inclination_deg=pair_inc,
                 angular_speed=pair_speed,
-                phase=pair_phase + math.pi,
+                phase=pair_phase + math_main.pi,
             ),
         )
 
@@ -740,7 +740,7 @@ class SystemGenerator:
                 e = self.rng.uniform(0.0, min(0.03, self.presets["Moon"].eccentricity.max))
                 inc = self.presets["Moon"].inclination_deg.sample(self.rng)
                 speed = self.presets["Moon"].orbit_speed.sample(self.rng)
-                phase = self.rng.uniform(0.0, 2.0 * math.pi)
+                phase = self.rng.uniform(0.0, 2.0 * math_main.pi)
 
                 local_span = max(0.8, (max_allowed - required_min_a) * 0.08)
                 local_max_a = min(max_allowed, required_min_a + local_span)
