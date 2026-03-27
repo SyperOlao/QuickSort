@@ -168,6 +168,12 @@ class PlanetNoiseSettings:
     seed: int = 42
 
 
+@dataclass
+class WaterSettings:
+    water_level_01: float = 0.42
+    sea_epsilon: float = 1e-5
+
+
 FACE_NORMALS = [
     np.array([1.0, 0.0, 0.0], dtype=np.float64),
     np.array([-1.0, 0.0, 0.0], dtype=np.float64),
@@ -177,6 +183,10 @@ FACE_NORMALS = [
     np.array([0.0, 0.0, -1.0], dtype=np.float64),
 ]
 
+
+# =========================
+# Planet surface
+# =========================
 
 def face_axes(normal: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     if abs(normal[0]) > 0.5:
@@ -224,13 +234,21 @@ def evaluate_planet_height(direction: np.ndarray, settings: PlanetNoiseSettings)
 
 def generate_cube_sphere_planet(
     settings: PlanetNoiseSettings
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    returns:
+        vertices: (N,3)
+        triangles: (M,3)
+        heights: (N,)
+        radii: (N,)
+    """
     resolution = settings.resolution
     if resolution < 2:
         raise ValueError("resolution must be >= 2")
 
     vertices: List[np.ndarray] = []
     heights: List[float] = []
+    radii: List[float] = []
     triangles: List[Tuple[int, int, int]] = []
 
     for face_normal in FACE_NORMALS:
@@ -255,6 +273,7 @@ def generate_cube_sphere_planet(
                 idx = len(vertices)
                 vertices.append(position)
                 heights.append(height)
+                radii.append(final_radius)
                 face_indices[y, x] = idx
 
         for y in range(resolution - 1):
@@ -271,11 +290,200 @@ def generate_cube_sphere_planet(
         np.asarray(vertices, dtype=np.float64),
         np.asarray(triangles, dtype=np.int32),
         np.asarray(heights, dtype=np.float64),
+        np.asarray(radii, dtype=np.float64),
     )
 
 
+# =========================
+# Water / Sea clipping
+# =========================
+
+@dataclass
+class LiquidSample:
+    direction: np.ndarray
+    terrain_radius: float
+    underwater: bool
+
+
+def compute_sea_radius(radii: np.ndarray, water_settings: WaterSettings) -> float:
+    min_r = float(np.min(radii))
+    max_r = float(np.max(radii))
+    t = max(0.0, min(1.0, water_settings.water_level_01))
+    return lerp(min_r, max_r, t)
+
+
+def make_liquid_vertex(sample: LiquidSample, sea_radius: float) -> np.ndarray:
+    return normalize(sample.direction) * sea_radius
+
+
+def intersect_sea_edge(a: LiquidSample, b: LiquidSample, sea_radius: float) -> np.ndarray:
+    da = a.terrain_radius - sea_radius
+    db = b.terrain_radius - sea_radius
+    denom = da - db
+
+    t = 0.5
+    if abs(denom) > 1e-12:
+        t = da / denom
+    t = max(0.0, min(1.0, t))
+
+    dir_interp = normalize(a.direction * (1.0 - t) + b.direction * t)
+    return dir_interp * sea_radius
+
+
+def append_triangle(
+    vertices_out: List[np.ndarray],
+    triangles_out: List[Tuple[int, int, int]],
+    p0: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+) -> None:
+    i0 = len(vertices_out)
+    vertices_out.append(p0)
+    i1 = len(vertices_out)
+    vertices_out.append(p1)
+    i2 = len(vertices_out)
+    vertices_out.append(p2)
+    triangles_out.append((i0, i1, i2))
+
+
+def append_clipped_liquid_triangle(
+    vertices_out: List[np.ndarray],
+    triangles_out: List[Tuple[int, int, int]],
+    a: LiquidSample,
+    b: LiquidSample,
+    c: LiquidSample,
+    sea_radius: float,
+) -> None:
+    ba = a.underwater
+    bb = b.underwater
+    bc = c.underwater
+
+    under_count = int(ba) + int(bb) + int(bc)
+
+    if under_count == 0:
+        return
+
+    if under_count == 3:
+        append_triangle(
+            vertices_out,
+            triangles_out,
+            make_liquid_vertex(a, sea_radius),
+            make_liquid_vertex(b, sea_radius),
+            make_liquid_vertex(c, sea_radius),
+        )
+        return
+
+    if under_count == 1:
+        if ba:
+            inside = a
+            out1 = b
+            out2 = c
+        elif bb:
+            inside = b
+            out1 = c
+            out2 = a
+        else:
+            inside = c
+            out1 = a
+            out2 = b
+
+        p0 = make_liquid_vertex(inside, sea_radius)
+        p1 = intersect_sea_edge(inside, out1, sea_radius)
+        p2 = intersect_sea_edge(inside, out2, sea_radius)
+
+        append_triangle(vertices_out, triangles_out, p0, p1, p2)
+        return
+
+    if under_count == 2:
+        if not ba:
+            outside = a
+            in1 = b
+            in2 = c
+        elif not bb:
+            outside = b
+            in1 = c
+            in2 = a
+        else:
+            outside = c
+            in1 = a
+            in2 = b
+
+        p0 = make_liquid_vertex(in1, sea_radius)
+        p1 = make_liquid_vertex(in2, sea_radius)
+        p2 = intersect_sea_edge(in2, outside, sea_radius)
+        p3 = intersect_sea_edge(in1, outside, sea_radius)
+
+        append_triangle(vertices_out, triangles_out, p0, p1, p2)
+        append_triangle(vertices_out, triangles_out, p0, p2, p3)
+        return
+
+
+def build_water_mesh_from_planet(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    radii: np.ndarray,
+    sea_radius: float,
+    water_settings: WaterSettings,
+) -> Tuple[np.ndarray, np.ndarray]:
+    water_vertices: List[np.ndarray] = []
+    water_triangles: List[Tuple[int, int, int]] = []
+
+    sea_eps = water_settings.sea_epsilon
+
+    for tri in triangles:
+        i0, i1, i2 = map(int, tri)
+
+        p0 = vertices[i0]
+        p1 = vertices[i1]
+        p2 = vertices[i2]
+
+        r0 = radii[i0]
+        r1 = radii[i1]
+        r2 = radii[i2]
+
+        s0 = LiquidSample(
+            direction=normalize(p0),
+            terrain_radius=float(r0),
+            underwater=bool(r0 <= sea_radius + sea_eps),
+        )
+        s1 = LiquidSample(
+            direction=normalize(p1),
+            terrain_radius=float(r1),
+            underwater=bool(r1 <= sea_radius + sea_eps),
+        )
+        s2 = LiquidSample(
+            direction=normalize(p2),
+            terrain_radius=float(r2),
+            underwater=bool(r2 <= sea_radius + sea_eps),
+        )
+
+        append_clipped_liquid_triangle(
+            water_vertices,
+            water_triangles,
+            s0, s1, s2,
+            sea_radius
+        )
+
+    if not water_vertices:
+        return (
+            np.zeros((0, 3), dtype=np.float64),
+            np.zeros((0, 3), dtype=np.int32),
+        )
+
+    return (
+        np.asarray(water_vertices, dtype=np.float64),
+        np.asarray(water_triangles, dtype=np.int32),
+    )
+
+
+# =========================
+# Mesh utils
+# =========================
+
 def build_pyvista_mesh(vertices: np.ndarray, triangles: np.ndarray) -> pv.PolyData:
-    # PyVista хочет faces в виде [3, i0, i1, i2, 3, i0, i1, i2, ...]
+    if len(vertices) == 0 or len(triangles) == 0:
+        return pv.PolyData()
+
     faces = np.hstack([
         np.full((triangles.shape[0], 1), 3, dtype=np.int32),
         triangles
@@ -286,39 +494,73 @@ def build_pyvista_mesh(vertices: np.ndarray, triangles: np.ndarray) -> pv.PolyDa
     return mesh
 
 
-def show_planet(vertices: np.ndarray, triangles: np.ndarray, heights: np.ndarray) -> None:
-    mesh = build_pyvista_mesh(vertices, triangles)
+# =========================
+# Rendering
+# =========================
 
-    mesh["height"] = heights
+def show_planet_with_water(
+    land_vertices: np.ndarray,
+    land_triangles: np.ndarray,
+    heights: np.ndarray,
+    water_vertices: np.ndarray,
+    water_triangles: np.ndarray,
+    sea_radius: float,
+) -> None:
+    land_mesh = build_pyvista_mesh(land_vertices, land_triangles)
+    land_mesh["height"] = heights
 
-    plotter = pv.Plotter(window_size=(1400, 900))
+    water_mesh = build_pyvista_mesh(water_vertices, water_triangles)
+
+    plotter = pv.Plotter(window_size=(1600, 950))
     plotter.set_background("#0b1020")
 
+    # Суша
     plotter.add_mesh(
-        mesh,
+        land_mesh,
         scalars="height",
         cmap="terrain",
         smooth_shading=True,
         show_edges=False,
-        specular=0.15,
+        specular=0.08,
     )
 
-    plotter.add_axes()
-    plotter.add_text("Procedural Planet", position="upper_left", font_size=12)
-    plotter.show_grid()
+    # Вода
+    if water_mesh.n_points > 0:
+        plotter.add_mesh(
+            water_mesh,
+            color="#3b82f6",
+            smooth_shading=True,
+            show_edges=False,
+            opacity=0.92,
+            specular=0.35,
+        )
 
-    # Небольшой источник света
-    light = pv.Light(position=(5, 3, 2), focal_point=(0, 0, 0), intensity=1.2)
-    plotter.add_light(light)
+    light1 = pv.Light(position=(5, 3, 2), focal_point=(0, 0, 0), intensity=1.2)
+    light2 = pv.Light(position=(-4, -2, 1), focal_point=(0, 0, 0), intensity=0.35)
+
+    plotter.add_light(light1)
+    plotter.add_light(light2)
+
+    plotter.add_axes()
+    plotter.show_grid()
+    plotter.add_text(
+        f"Procedural Planet | Sea Radius = {sea_radius:.4f}",
+        position="upper_left",
+        font_size=12
+    )
 
     plotter.camera_position = "iso"
     plotter.show()
 
 
+# =========================
+# Main
+# =========================
+
 if __name__ == "__main__":
-    settings = PlanetNoiseSettings(
+    planet_settings = PlanetNoiseSettings(
         radius=1.0,
-        resolution=128,          # можно 64/96/128
+        resolution=128,
         continent_frequency=1.5,
         continent_octaves=5,
         continent_strength=0.20,
@@ -328,9 +570,34 @@ if __name__ == "__main__":
         seed=42,
     )
 
-    vertices, triangles, heights = generate_cube_sphere_planet(settings)
+    water_settings = WaterSettings(
+        water_level_01=0.42,   # ниже = меньше воды, выше = больше
+        sea_epsilon=1e-5,
+    )
 
-    print("Vertices:", vertices.shape)
-    print("Triangles:", triangles.shape)
+    land_vertices, land_triangles, heights, radii = generate_cube_sphere_planet(planet_settings)
 
-    show_planet(vertices, triangles, heights)
+    sea_radius = compute_sea_radius(radii, water_settings)
+
+    water_vertices, water_triangles = build_water_mesh_from_planet(
+        land_vertices,
+        land_triangles,
+        radii,
+        sea_radius,
+        water_settings,
+    )
+
+    print("Land vertices:", land_vertices.shape)
+    print("Land triangles:", land_triangles.shape)
+    print("Water vertices:", water_vertices.shape)
+    print("Water triangles:", water_triangles.shape)
+    print("Sea radius:", sea_radius)
+
+    show_planet_with_water(
+        land_vertices,
+        land_triangles,
+        heights,
+        water_vertices,
+        water_triangles,
+        sea_radius,
+    )
